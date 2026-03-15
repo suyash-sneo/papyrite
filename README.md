@@ -12,3 +12,11 @@ Papyrite is intended to be a NoSQL alternative for embedded database, i.e., inst
 8. Basic compaction
 9. C ABI for core operations
 10. Test harness
+
+---
+
+# Basic commands done
+
+- cargo run -p cli -- put test.db key value
+- cargo run -p cli -- get test.db key
+- cargo run -p cli -- dump test.db
