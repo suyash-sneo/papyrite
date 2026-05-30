@@ -1,0 +1,453 @@
+===============================================================================
+PAPYRITE STORAGE STRUCTURE
+===============================================================================
+
+This file documents the current binary storage format used by:
+
+    engine/src/record.rs
+    engine/src/codec.rs
+
+All numeric metadata is little-endian.
+All strings and object keys are UTF-8 bytes.
+There is no file header or format version yet.
+
+
+===============================================================================
+FILE LAYOUT
+===============================================================================
+
+The database file is an append-only stream of records.
+
+    +----------+----------+----------+-----+
+    | record 0 | record 1 | record 2 | ... |
+    +----------+----------+----------+-----+
+
+Create and update operations append Put records.
+Delete operations append Delete records.
+
+Reads scan the whole file from left to right and keep the latest state for each
+document id.
+
+
+===============================================================================
+RECORD LAYOUT
+===============================================================================
+
+Every record starts with the same fixed-size header.
+
+    +------------+------+-----------------------------------------------+
+    | Field      | Size | Meaning                                       |
+    +============+======+===============================================+
+    | record_tag | u8   | 1 = Put, 2 = Delete                           |
+    | id_len     | u32  | Number of bytes in id_bytes                   |
+    | doc_len    | u32  | Number of bytes in doc_bytes; 0 for Delete    |
+    +------------+------+-----------------------------------------------+
+
+
+-------------------------------------------------------------------------------
+Put Record
+-------------------------------------------------------------------------------
+
+    +------------+------+-----------------------------------------------+
+    | Field      | Size | Meaning                                       |
+    +============+======+===============================================+
+    | record_tag | u8   | Always 1                                      |
+    | id_len     | u32  | Number of bytes in id_bytes                   |
+    | doc_len    | u32  | Number of bytes in encoded document           |
+    | id_bytes   | [u8] | UTF-8 document id                             |
+    | doc_bytes  | [u8] | Encoded Value::Object                         |
+    +------------+------+-----------------------------------------------+
+
+Flat view:
+
+    +-----+----------+-----------+--------------+----------------------+
+    |  1  | id_len   | doc_len   | id_bytes     | doc_bytes            |
+    +-----+----------+-----------+--------------+----------------------+
+      u8     u32        u32        id_len bytes   doc_len bytes
+
+
+-------------------------------------------------------------------------------
+Delete Record
+-------------------------------------------------------------------------------
+
+    +------------+------+-----------------------------------------------+
+    | Field      | Size | Meaning                                       |
+    +============+======+===============================================+
+    | record_tag | u8   | Always 2                                      |
+    | id_len     | u32  | Number of bytes in id_bytes                   |
+    | doc_len    | u32  | Always 0                                      |
+    | id_bytes   | [u8] | UTF-8 document id                             |
+    +------------+------+-----------------------------------------------+
+
+Flat view:
+
+    +-----+----------+-----------+--------------+
+    |  2  | id_len   |     0     | id_bytes     |
+    +-----+----------+-----------+--------------+
+      u8     u32        u32        id_len bytes
+
+
+-------------------------------------------------------------------------------
+Record Metadata vs Document Data
+-------------------------------------------------------------------------------
+
+The record id is stored outside the document payload:
+
+    record metadata:  id_bytes
+    document field:   "_id"
+
+For Put records, the encoded document must be an object with a string "_id"
+field, and that "_id" must match the record id.
+
+
+===============================================================================
+VALUE TAGS
+===============================================================================
+
+Every encoded Value starts with a one-byte tag.
+
+    +-----+----------------+-------------------------------+
+    | Tag | Value Variant  | Payload After Tag             |
+    +=====+================+===============================+
+    | 0   | Null           | none                          |
+    | 1   | Bool(false)    | none                          |
+    | 2   | Bool(true)     | none                          |
+    | 3   | Int(i64)       | i64                           |
+    | 4   | Float(f64)     | f64                           |
+    | 5   | String         | u32 byte_len + UTF-8 bytes    |
+    | 6   | Blob           | u32 byte_len + raw bytes      |
+    | 7   | Array          | array header + value payload  |
+    | 8   | Object         | object header + object body   |
+    +-----+----------------+-------------------------------+
+
+
+===============================================================================
+PRIMITIVE VALUE LAYOUTS
+===============================================================================
+
+    +--------------+----------------------------------------+
+    | Value        | Bytes                                  |
+    +==============+========================================+
+    | Null         | tag:u8 = 0                             |
+    | Bool(false)  | tag:u8 = 1                             |
+    | Bool(true)   | tag:u8 = 2                             |
+    | Int          | tag:u8 = 3, value:i64                  |
+    | Float        | tag:u8 = 4, value:f64                  |
+    | String       | tag:u8 = 5, byte_len:u32, bytes:[u8]   |
+    | Blob         | tag:u8 = 6, byte_len:u32, bytes:[u8]   |
+    +--------------+----------------------------------------+
+
+String example, "u1":
+
+    +-----+------------+-------+
+    |  5  |     2      | "u1"  |
+    +-----+------------+-------+
+      u8      u32        2 bytes
+
+Encoded length:
+
+    1 + 4 + 2 = 7 bytes
+
+
+===============================================================================
+ARRAY LAYOUT
+===============================================================================
+
+Arrays store a byte length, an element count, and then each encoded element.
+
+    +-------------+------+-----------------------------------------------+
+    | Field       | Size | Meaning                                       |
+    +=============+======+===============================================+
+    | tag         | u8   | Always 7                                      |
+    | payload_len | u64  | Byte length of all encoded elements           |
+    | elem_count  | u32  | Number of array elements                      |
+    | payload     | [u8] | Encoded values concatenated back to back      |
+    +-------------+------+-----------------------------------------------+
+
+Flat view:
+
+    +-----+-------------+------------+-------------------------------+
+    |  7  | payload_len | elem_count | encoded_value encoded_value...|
+    +-----+-------------+------------+-------------------------------+
+      u8       u64           u32         payload_len bytes
+
+Arrays do not have a directory. Decoding walks the payload from left to right
+and decodes elem_count values.
+
+
+===============================================================================
+OBJECT LAYOUT
+===============================================================================
+
+Objects have:
+
+    1. A fixed-size object header
+    2. A field directory
+    3. A values section
+
+Flat view:
+
+    +-----+---------+-------------+---------------+-----------+--------+
+    |  8  | obj_len | field_count | dir_bytes_len | directory | values |
+    +-----+---------+-------------+---------------+-----------+--------+
+      u8     u64         u32             u32          [u8]       [u8]
+
+
+-------------------------------------------------------------------------------
+Object Header
+-------------------------------------------------------------------------------
+
+The object header is always 17 bytes.
+
+    +---------------+------+-----------------------------------------------+
+    | Field         | Size | Meaning                                       |
+    +===============+======+===============================================+
+    | tag           | u8   | Always 8                                      |
+    | obj_len       | u64  | Byte length of directory + values             |
+    | field_count   | u32  | Number of fields in the object                |
+    | dir_bytes_len | u32  | Byte length of the directory section          |
+    +---------------+------+-----------------------------------------------+
+
+Important:
+
+    obj_len does not include the 17-byte object header.
+    obj_len only covers directory + values.
+
+
+-------------------------------------------------------------------------------
+Object Directory
+-------------------------------------------------------------------------------
+
+The directory contains one entry per field.
+
+Each entry stores the field name plus metadata about where that field's encoded
+value lives in the values section.
+
+    +--------------+------+-----------------------------------------------+
+    | Field        | Size | Meaning                                       |
+    +==============+======+===============================================+
+    | key_len      | u16  | Number of bytes in key_bytes                  |
+    | key_bytes    | [u8] | UTF-8 field name                              |
+    | value_tag    | u8   | Expected tag of the encoded field value       |
+    | value_offset | u32  | Offset into the object values section         |
+    +--------------+------+-----------------------------------------------+
+
+Entry view:
+
+    +----------+--------------+-----------+--------------+
+    | key_len  | key_bytes    | value_tag | value_offset |
+    +----------+--------------+-----------+--------------+
+       u16       key_len bytes     u8          u32
+
+Directory view:
+
+    +----------+----------+----------+-----+
+    | entry 0  | entry 1  | entry 2  | ... |
+    +----------+----------+----------+-----+
+
+Object fields are encoded from BTreeMap<String, Value>, so the field order is
+sorted by key.
+
+value_offset is relative to the start of the values section. It is not relative
+to the start of the file, record, or object.
+
+The decoder currently expects value offsets to be contiguous:
+
+    entry 0 offset = 0
+    entry 1 offset = encoded length of value 0
+    entry 2 offset = encoded length of value 0 + value 1
+    ...
+
+
+-------------------------------------------------------------------------------
+Object Values Section
+-------------------------------------------------------------------------------
+
+The values section is the encoded field values concatenated together.
+
+    +-------------------+-------------------+-------------------+-----+
+    | encoded value 0   | encoded value 1   | encoded value 2   | ... |
+    +-------------------+-------------------+-------------------+-----+
+
+The directory gives the decoder:
+
+    field name
+    expected value tag
+    offset where the encoded value starts
+
+The encoded value also starts with its own tag. During decoding, the directory
+value_tag is checked against the actual decoded value tag.
+
+
+===============================================================================
+OBJECT EXAMPLE
+===============================================================================
+
+JSON document:
+
+    {"_id":"u1","age":30,"name":"Anna"}
+
+Internal Value:
+
+    Value::Object({
+        "_id": Value::String("u1"),
+        "age": Value::Int(30),
+        "name": Value::String("Anna"),
+    })
+
+Sorted BTreeMap field order:
+
+    +-------+-----------------------+----------------+
+    | Index | Field                 | Encoded Length |
+    +=======+=======================+================+
+    | 0     | "_id": String("u1")   | 7 bytes        |
+    | 1     | "age": Int(30)        | 9 bytes        |
+    | 2     | "name": String("Anna")| 9 bytes        |
+    +-------+-----------------------+----------------+
+
+
+-------------------------------------------------------------------------------
+Encoded Field Values
+-------------------------------------------------------------------------------
+
+    +----------------+----------------------+--------------------------+
+    | Field          | Encoded Bytes        | Length                   |
+    +================+======================+==========================+
+    | "_id"          | tag 5, len 2, "u1"   | 1 + 4 + 2 = 7            |
+    | "age"          | tag 3, i64 30        | 1 + 8 = 9                |
+    | "name"         | tag 5, len 4, "Anna" | 1 + 4 + 4 = 9            |
+    +----------------+----------------------+--------------------------+
+
+Values section:
+
+    +----------------------+----------------------+----------------------+
+    | String("u1")         | Int(30)              | String("Anna")       |
+    +----------------------+----------------------+----------------------+
+    offset 0               offset 7               offset 16
+
+Total values length:
+
+    7 + 9 + 9 = 25 bytes
+
+
+-------------------------------------------------------------------------------
+Directory Entries
+-------------------------------------------------------------------------------
+
+    +-------+---------+---------+-----------+--------------+-------------+
+    | Field | key_len | key     | value_tag | value_offset | Entry Bytes |
+    +=======+=========+=========+===========+==============+=============+
+    | _id   | 3       | "_id"   | 5         | 0            | 10          |
+    | age   | 3       | "age"   | 3         | 7            | 10          |
+    | name  | 4       | "name"  | 5         | 16           | 11          |
+    +-------+---------+---------+-----------+--------------+-------------+
+
+Entry byte counts:
+
+    "_id" entry = key_len:u16 + 3 key bytes + value_tag:u8 + value_offset:u32
+                = 2 + 3 + 1 + 4
+                = 10 bytes
+
+    "age" entry = 2 + 3 + 1 + 4
+                = 10 bytes
+
+    "name" entry = 2 + 4 + 1 + 4
+                 = 11 bytes
+
+Directory length:
+
+    10 + 10 + 11 = 31 bytes
+
+
+-------------------------------------------------------------------------------
+Object Header Values For The Example
+-------------------------------------------------------------------------------
+
+    +---------------+-------+-----------------------------------------------+
+    | Field         | Value | Meaning                                       |
+    +===============+=======+===============================================+
+    | tag           | 8     | Object                                        |
+    | obj_len       | 56    | directory 31 + values 25                      |
+    | field_count   | 3     | "_id", "age", "name"                          |
+    | dir_bytes_len | 31    | byte length of directory                      |
+    +---------------+-------+-----------------------------------------------+
+
+Encoded object total length:
+
+    object header + obj_len
+    17 + 56 = 73 bytes
+
+
+-------------------------------------------------------------------------------
+Put Record For The Example
+-------------------------------------------------------------------------------
+
+For record id "u1":
+
+    +------------+-------+-----------------------------------------------+
+    | Field      | Value | Meaning                                       |
+    +============+=======+===============================================+
+    | record_tag | 1     | Put                                           |
+    | id_len     | 2     | "u1" is 2 bytes                               |
+    | doc_len    | 73    | encoded object length                         |
+    | id_bytes   | "u1"  | record id                                     |
+    | doc_bytes  | 73 B  | encoded object                                |
+    +------------+-------+-----------------------------------------------+
+
+Encoded record total length:
+
+    record header + id bytes + document bytes
+    9 + 2 + 73 = 84 bytes
+
+
+===============================================================================
+METADATA BOUNDARIES
+===============================================================================
+
+    +-----------------+-------------------------------------------------------+
+    | Metadata Area   | Fields                                                |
+    +=================+=======================================================+
+    | Record metadata | record_tag, id_len, doc_len, id_bytes                 |
+    | Value metadata  | value tag, value-specific lengths and counts          |
+    | Array metadata  | payload_len, elem_count                               |
+    | Object metadata | obj_len, field_count, dir_bytes_len                   |
+    | Field metadata  | key_len, key_bytes, value_tag, value_offset           |
+    +-----------------+-------------------------------------------------------+
+
+Document identity appears in two places:
+
+    +----------------+--------------------------------------------------------+
+    | Location       | Meaning                                                |
+    +================+========================================================+
+    | record id      | id_bytes stored in the Put/Delete record               |
+    | document "_id" | normal object field inside the encoded document        |
+    +----------------+--------------------------------------------------------+
+
+The engine validates that both ids match for Put records.
+
+
+===============================================================================
+CURRENT LIMITS IMPLIED BY ENCODING
+===============================================================================
+
+    +--------------------------+--------------------------------------------+
+    | Item                     | Limit                                      |
+    +==========================+============================================+
+    | record id length         | <= u32::MAX bytes                          |
+    | record document length   | <= u32::MAX bytes                          |
+    | string length            | <= u32::MAX bytes                          |
+    | blob length              | <= u32::MAX bytes                          |
+    | array payload length     | <= u64::MAX bytes                          |
+    | array element count      | <= u32::MAX                                |
+    | object field count       | <= u32::MAX                                |
+    | object key length        | <= u16::MAX bytes                          |
+    | object value offset      | <= u32::MAX bytes                          |
+    | object total payload     | <= u64::MAX bytes                          |
+    +--------------------------+--------------------------------------------+
+
+Note:
+
+    Object payload length is stored as u64, but a Put record's doc_len is u32.
+    In practice, a top-level document stored in a record is constrained by
+    doc_len <= u32::MAX.
+
