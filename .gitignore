@@ -3,3 +3,4 @@ target/
 *.db
 .idea/
 .DS_Store
+debug-command.txt

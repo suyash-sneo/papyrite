@@ -46,6 +46,24 @@ cargo run -p cli -- <db-path> '<command(payload)>'
 
 Use quotes around command expressions so your shell does not interpret JSON braces or parentheses.
 
+You can also read the command expression from a file by prefixing the path with `@`:
+
+```sh
+cargo run -p cli -- test.db @debug-command.txt
+```
+
+For example, `debug-command.txt` can contain:
+
+```text
+create({"_id":"u1","name":"Anna"})
+```
+
+The file is trimmed before parsing, so trailing newlines are fine. This is useful for IDE debugging because the run/debug configuration can stay fixed while you edit the command file:
+
+```text
+run -p cli -- /tmp/papyrite-debug.db @debug-command.txt
+```
+
 ### Create
 
 Creates a document. The document root must be an object and `_id` must be a string.

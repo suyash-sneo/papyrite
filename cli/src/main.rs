@@ -1,5 +1,5 @@
-use std::env;
 use std::process;
+use std::{env, fs};
 
 use engine::Database;
 
@@ -25,7 +25,7 @@ fn run() -> Result<(), String> {
     let db_path = args
         .next()
         .ok_or_else(|| "usage: cli <db-path> '<command(...)>'".to_string())?;
-    let command_str = args
+    let command_arg = args
         .next()
         .ok_or_else(|| "usage: cli <db-path> '<command(...)>'".to_string())?;
 
@@ -33,6 +33,7 @@ fn run() -> Result<(), String> {
         return Err("usage: cli <db-path> '<command(...)>'".to_string());
     }
 
+    let command_str = read_command_arg(&command_arg)?;
     let db = Database::open(db_path);
     match parse_command(&command_str)? {
         Command::Create(payload) => {
@@ -62,6 +63,20 @@ fn run() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn read_command_arg(input: &str) -> Result<String, String> {
+    let Some(path) = input.strip_prefix('@') else {
+        return Ok(input.to_string());
+    };
+
+    if path.is_empty() {
+        return Err("command file path must not be empty".to_string());
+    }
+
+    fs::read_to_string(path)
+        .map(|command| command.trim().to_string())
+        .map_err(|err| format!("failed to read command file '{path}': {err}"))
 }
 
 fn parse_command(input: &str) -> Result<Command<'_>, String> {

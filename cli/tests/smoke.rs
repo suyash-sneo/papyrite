@@ -1,4 +1,5 @@
 use assert_cmd::prelude::*;
+use std::io::Write;
 use std::process::Command;
 use tempfile::NamedTempFile;
 
@@ -82,4 +83,18 @@ fn invalid_command_exits_nonzero() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("unknown command"));
+}
+
+#[test]
+fn command_file_is_supported() {
+    let db = NamedTempFile::new().unwrap();
+    let mut command_file = NamedTempFile::new().unwrap();
+    writeln!(command_file, r#"create({{"_id":"u1","name":"Anna"}})"#).unwrap();
+
+    cli_command()
+        .arg(db.path())
+        .arg(format!("@{}", command_file.path().display()))
+        .assert()
+        .success()
+        .stdout("ok\n");
 }
