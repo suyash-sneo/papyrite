@@ -1,0 +1,350 @@
+===============================================================================
+PAPYRITE C ABI AND FLUTTER FFI
+===============================================================================
+
+This document describes the FFI layer added around the Rust engine and the Dart
+package that calls it from Flutter.
+
+The engine crate is not modified by this layer.
+
+
+===============================================================================
+GOALS
+===============================================================================
+
+    +--------------------------+--------------------------------------------+
+    | Goal                     | Decision                                   |
+    +==========================+============================================+
+    | Simple ABI               | Path + JSON bytes in, result struct out    |
+    | Current feature coverage | create, get, delete, update, find, dump    |
+    | Engine isolation         | FFI crate depends on engine crate          |
+    | Panic safety             | Each exported function catches panics      |
+    | Clear ownership          | Rust allocates result buffers              |
+    | Dart safety              | Dart copies buffers before freeing Rust    |
+    +--------------------------+--------------------------------------------+
+
+
+===============================================================================
+RUST CRATE LAYOUT
+===============================================================================
+
+    +----------------------+-----------------------------------------------+
+    | Path                 | Purpose                                       |
+    +======================+===============================================+
+    | ffi/Cargo.toml       | Defines papyrite_ffi library crate            |
+    | ffi/src/lib.rs       | C ABI implementation                          |
+    | ffi/include/papyrite.h | C header for native callers                 |
+    +----------------------+-----------------------------------------------+
+
+The FFI crate builds these library forms:
+
+    +-----------+-----------------------------------------------------------+
+    | Type      | Use                                                       |
+    +===========+===========================================================+
+    | cdylib    | Android .so, desktop dynamic loading                      |
+    | staticlib | iOS static library / xcframework packaging                |
+    | rlib      | Rust tests and internal linking                            |
+    +-----------+-----------------------------------------------------------+
+
+
+===============================================================================
+C ABI TYPES
+===============================================================================
+
+All input strings are passed as UTF-8 byte pointer + byte length.
+They do not need to be NUL terminated.
+
+Returned strings and JSON documents are Rust-owned buffers.
+
+
+-------------------------------------------------------------------------------
+PapyriteBuffer
+-------------------------------------------------------------------------------
+
+    +-------+---------+-----------------------------------------------+
+    | Field | Type    | Meaning                                       |
+    +=======+=========+===============================================+
+    | ptr   | uint8_t*| Pointer to Rust-owned bytes                   |
+    | len   | size_t  | Number of bytes at ptr                        |
+    +-------+---------+-----------------------------------------------+
+
+Empty buffers are returned as:
+
+    ptr = NULL
+    len = 0
+
+
+-------------------------------------------------------------------------------
+PapyriteResult
+-------------------------------------------------------------------------------
+
+    +------------+----------------+---------------------------------------+
+    | Field      | Type           | Meaning                               |
+    +============+================+=======================================+
+    | code       | int32_t        | Status code                           |
+    | data       | PapyriteBuffer | Success payload, if any               |
+    | error      | PapyriteBuffer | Error message when code != 0          |
+    | bool_value | uint8_t        | Boolean return value for some calls   |
+    +------------+----------------+---------------------------------------+
+
+Status codes:
+
+    +------+-----------------------------+----------------------------------+
+    | Code | Name                        | Meaning                          |
+    +======+=============================+==================================+
+    | 0    | PAPYRITE_STATUS_OK          | Call succeeded                   |
+    | 1    | PAPYRITE_STATUS_INVALID_ARGUMENT | Bad pointer, length, UTF-8 |
+    | 2    | PAPYRITE_STATUS_ENGINE_ERROR| Engine returned an error         |
+    | 3    | PAPYRITE_STATUS_PANIC       | Panic caught at ABI boundary     |
+    +------+-----------------------------+----------------------------------+
+
+
+===============================================================================
+C ABI FUNCTIONS
+===============================================================================
+
+All functions return the same status code that is also written to out->code.
+
+    +-----------------------+--------------+----------------+----------------+
+    | Function              | JSON Input   | data           | bool_value     |
+    +=======================+==============+================+================+
+    | papyrite_create_json  | document     | empty          | unused         |
+    | papyrite_get_json     | _id filter   | document JSON  | 1 found, 0 no  |
+    | papyrite_delete_json  | _id filter   | empty          | 1 deleted, 0 no|
+    | papyrite_update_json  | update req   | empty          | unused         |
+    | papyrite_find_json    | find query   | JSON array     | unused         |
+    | papyrite_dump_json    | none         | JSON array     | unused         |
+    +-----------------------+--------------+----------------+----------------+
+
+Inputs match the existing engine JSON API:
+
+    create document:
+        {"_id":"u1","name":"Anna"}
+
+    get/delete filter:
+        {"_id":"u1"}
+
+    update request:
+        {"filter":{"_id":"u1"},"set":{"name":"Anya"}}
+
+    find query:
+        {"path":"name","eq":"Anya"}
+
+
+===============================================================================
+PANIC AND ERROR BOUNDARY
+===============================================================================
+
+Every exported function follows this shape:
+
+    +----------------------+----------------------------------------------+
+    | Step                 | Behavior                                     |
+    +======================+==============================================+
+    | Validate out pointer | NULL out returns INVALID_ARGUMENT            |
+    | Validate input bytes | NULL + nonzero len and bad UTF-8 are errors  |
+    | Call engine          | Engine errors become ENGINE_ERROR            |
+    | Catch panic          | Rust panic becomes PANIC result              |
+    | Write result         | Result is written to caller-provided memory  |
+    +----------------------+----------------------------------------------+
+
+Panics are caught inside the Rust FFI function. They do not cross the C ABI
+boundary.
+
+
+===============================================================================
+MEMORY OWNERSHIP
+===============================================================================
+
+The caller owns input memory.
+Rust never keeps input pointers after the call returns.
+
+Rust owns result buffers.
+The caller must release Rust-owned result buffers.
+
+
+-------------------------------------------------------------------------------
+Preferred Free Path
+-------------------------------------------------------------------------------
+
+Use papyrite_result_free once after copying any needed bytes.
+
+    +--------+--------------------------------------------------------------+
+    | Step   | Action                                                       |
+    +========+==============================================================+
+    | 1      | Caller allocates PapyriteResult                              |
+    | 2      | Caller invokes ABI function                                  |
+    | 3      | Caller copies out->data and/or out->error if needed          |
+    | 4      | Caller calls papyrite_result_free(&out)                      |
+    | 5      | Caller releases its own PapyriteResult storage               |
+    +--------+--------------------------------------------------------------+
+
+The lower-level papyrite_buffer_free(ptr, len) exists for C callers that want
+to free one buffer manually. Do not free the same buffer twice.
+
+
+===============================================================================
+DART PACKAGE LAYOUT
+===============================================================================
+
+    +------------------------------------------------+----------------------+
+    | Path                                           | Purpose              |
+    +================================================+======================+
+    | packages/papyrite_flutter/pubspec.yaml         | Flutter FFI package  |
+    | packages/papyrite_flutter/lib/papyrite_flutter.dart | Public exports |
+    | packages/papyrite_flutter/lib/src/papyrite_bindings.dart | FFI calls |
+    | packages/papyrite_flutter/lib/src/papyrite_database.dart | Dart API  |
+    | packages/papyrite_flutter/android/src/main/jniLibs | Android .so out |
+    | packages/papyrite_flutter/ios/Frameworks       | iOS xcframework out  |
+    +------------------------------------------------+----------------------+
+
+
+===============================================================================
+DART DATA FLOW
+===============================================================================
+
+For create/update/find/get/delete JSON calls:
+
+    +------+---------------------------------------------------------------+
+    | Step | Flow                                                          |
+    +======+===============================================================+
+    | 1    | Dart encodes db path to UTF-8 bytes                           |
+    | 2    | Dart encodes JSON string to UTF-8 bytes                       |
+    | 3    | Dart allocates temporary native input buffers with calloc      |
+    | 4    | Dart calls the Rust C ABI function                            |
+    | 5    | Rust writes PapyriteResult                                    |
+    | 6    | Dart copies data/error bytes into Dart-owned Uint8List         |
+    | 7    | Dart calls papyrite_result_free                               |
+    | 8    | Dart frees temporary input buffers                            |
+    | 9    | Dart decodes copied UTF-8 JSON into idiomatic Dart objects     |
+    +------+---------------------------------------------------------------+
+
+Important:
+
+    Dart never reads Rust-owned buffers after papyrite_result_free.
+    Returned bytes are copied first.
+
+
+===============================================================================
+IDIOMATIC DART API
+===============================================================================
+
+The public wrapper is PapyriteDatabase.
+
+    +-----------------------------+-----------------------------------------+
+    | Dart Method                 | Behavior                                |
+    +=============================+=========================================+
+    | create(Map document)        | Encodes map and calls createJson        |
+    | createJson(String json)     | Calls papyrite_create_json              |
+    | get(String id)              | Returns Map<String,Object?>?            |
+    | getJson(String filter)      | Returns document JSON or null           |
+    | delete(String id)           | Returns bool                            |
+    | deleteJson(String filter)   | Returns bool                            |
+    | update(String id, ...)      | Builds update JSON and calls updateJson |
+    | updateJson(String json)     | Calls papyrite_update_json              |
+    | find(String path, value)    | Returns List<Map<String,Object?>>       |
+    | findJson(String json)       | Returns JSON array string               |
+    | dump()                      | Returns List<Map<String,Object?>>       |
+    | dumpJson()                  | Returns JSON array string               |
+    +-----------------------------+-----------------------------------------+
+
+
+===============================================================================
+NATIVE LIBRARY LOADING
+===============================================================================
+
+Default loading behavior:
+
+    +----------+------------------------------------------------------------+
+    | Platform | Loader                                                     |
+    +==========+============================================================+
+    | Android  | DynamicLibrary.open("libpapyrite_ffi.so")                  |
+    | iOS      | DynamicLibrary.process()                                   |
+    | Linux    | DynamicLibrary.open("libpapyrite_ffi.so")                  |
+    | macOS    | DynamicLibrary.open("libpapyrite_ffi.dylib")                |
+    | Windows  | DynamicLibrary.open("papyrite_ffi.dll")                    |
+    +----------+------------------------------------------------------------+
+
+On iOS, the Rust symbols are expected to be linked into the app process via the
+vendored Papyrite.xcframework.
+
+For tests or custom deployment, use:
+
+    PapyriteBindings.open(libraryPath: "/path/to/libpapyrite_ffi.so")
+
+
+===============================================================================
+MOBILE BUILD PROCESS
+===============================================================================
+
+Build script:
+
+    scripts/build-mobile-libs.sh [android|ios|all]
+
+
+-------------------------------------------------------------------------------
+Android
+-------------------------------------------------------------------------------
+
+Required tools:
+
+    cargo-ndk
+    Android NDK
+    Rust Android targets installed by cargo-ndk as needed
+
+Command:
+
+    scripts/build-mobile-libs.sh android
+
+Expected output:
+
+    packages/papyrite_flutter/android/src/main/jniLibs/
+        armeabi-v7a/libpapyrite_ffi.so
+        arm64-v8a/libpapyrite_ffi.so
+        x86/libpapyrite_ffi.so
+        x86_64/libpapyrite_ffi.so
+
+
+-------------------------------------------------------------------------------
+iOS
+-------------------------------------------------------------------------------
+
+Required tools:
+
+    Xcode command-line tools
+    xcodebuild
+    lipo
+    Rust iOS targets
+
+Command:
+
+    scripts/build-mobile-libs.sh ios
+
+Expected output:
+
+    packages/papyrite_flutter/ios/Frameworks/Papyrite.xcframework
+
+The xcframework contains:
+
+    iOS device static library
+    iOS simulator static library
+    ffi/include/papyrite.h headers
+
+
+===============================================================================
+ADDING THE FLUTTER PACKAGE TO AN APP
+===============================================================================
+
+Use a path dependency from your Flutter app:
+
+    dependencies:
+      papyrite_flutter:
+        path: ../papyrite/packages/papyrite_flutter
+
+Then use:
+
+    final db = PapyriteDatabase('/path/to/app-documents/papyrite.db');
+    db.create({'_id': 'u1', 'name': 'Anna'});
+    final doc = db.get('u1');
+
+Use a platform-specific application documents directory for the database path.
+Do not store the database in the app bundle.

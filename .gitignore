@@ -4,3 +4,8 @@ target/
 .idea/
 .DS_Store
 debug-command.txt
+packages/**/.dart_tool/
+packages/**/build/
+packages/**/.flutter-plugins
+packages/**/.flutter-plugins-dependencies
+packages/**/pubspec.lock

@@ -1,0 +1,31 @@
+group = "dev.papyrite.flutter"
+version = "0.1.0"
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.6.1"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+
+android {
+    namespace = "dev.papyrite.flutter"
+    compileSdk = 35
+
+    defaultConfig {
+        minSdk = 23
+    }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "papyrite_ffi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "papyrite_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+engine = { path = "../engine" }
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"

@@ -12,6 +12,8 @@ The current implementation supports:
 - Exact-match find on top-level or nested dot paths
 - Update with `set` and `unset` operations
 - Persistence across reopen
+- C ABI bindings
+- Flutter FFI package wrapper
 - Unit, integration, and CLI smoke tests
 
 Planned but not yet implemented:
@@ -21,14 +23,17 @@ Planned but not yet implemented:
 - Transactions
 - Crash recovery guarantees
 - Compaction
-- C ABI bindings
-
 ## Workspace
 
-This repository is a Rust workspace with two crates:
+This repository is a Rust workspace with three crates:
 
 - `engine`: database storage, record encoding, JSON conversion, query parsing, and document operations
 - `cli`: command-line wrapper around the engine JSON API
+- `papyrite_ffi`: C ABI wrapper around the engine for mobile and FFI callers
+
+It also includes a Flutter FFI package:
+
+- `packages/papyrite_flutter`: Dart wrapper and Android/iOS native packaging layout
 
 ## Requirements
 
@@ -200,6 +205,23 @@ Lower-level methods are also available for working with `Value` directly:
 ## Storage Model
 
 The database file is append-only. Creates and updates append `Put` records, and deletes append `Delete` records. Reads scan records and materialize the latest live state by document `_id`.
+
+More detail: [docs/storage-structure.txt](docs/storage-structure.txt).
+
+## C ABI And Flutter FFI
+
+The C ABI is exposed by the `papyrite_ffi` crate. It covers the current JSON operations: create, get, delete, update, find, and dump.
+
+The Flutter package in `packages/papyrite_flutter` loads the native library, wraps the C functions in Dart, copies Rust-owned return buffers before freeing them, and provides a `PapyriteDatabase` API.
+
+Build mobile native libraries with:
+
+```sh
+scripts/build-mobile-libs.sh android
+scripts/build-mobile-libs.sh ios
+```
+
+Full details: [docs/c-abi-flutter-ffi.txt](docs/c-abi-flutter-ffi.txt).
 
 ## Testing
 
